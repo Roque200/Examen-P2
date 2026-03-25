@@ -83,7 +83,9 @@ async function cargarCadena() {
     return []
   }
 
-  // Agrupar registros por bloque_index para reconstruir bloques
+  if (data.length === 0) return []
+
+  // Agrupar registros por bloque_index
   const bloquesPorIndex = {}
   for (const registro of data) {
     const idx = registro.bloque_index
@@ -114,7 +116,21 @@ async function cargarCadena() {
     })
   }
 
-  return Object.values(bloquesPorIndex)
+  const bloquesRestaurados = Object.values(bloquesPorIndex)
+
+  // El génesis nunca se persiste en grados (no tiene transacciones académicas)
+  // Lo reconstruimos como bloque sintético usando el hash_anterior del bloque más antiguo
+  const primerBloque = bloquesRestaurados[0]
+  const genesisReconstruido = {
+    index:        0,
+    hashActual:   primerBloque.hashAnterior,
+    hashAnterior: '0',
+    nonce:        0,
+    timestamp:    primerBloque.timestamp - 1,
+    data:         { mensaje: 'Bloque Génesis - Red Blockchain Grados Académicos' },
+  }
+
+  return [genesisReconstruido, ...bloquesRestaurados]
 }
 
 module.exports = { persistirBloque, marcarComoPropagado, cargarCadena }
