@@ -1,0 +1,529 @@
+openapi: 3.0.3
+info:
+  title: Red Blockchain Distribuida — Grados Académicos
+  description: |
+    API REST para un nodo de la red blockchain distribuida que gestiona
+    títulos y grados académicos. Cada nodo es autónomo, expone esta API
+    y se comunica con los demás nodos del equipo para mantener una cadena
+    distribuida e inmutable de registros académicos.
+  version: 1.0.0
+  contact:
+    name: Roberto García
+    email: roberto@ejemplo.com
+
+servers:
+  - url: http://localhost:8001
+    description: Nodo 1 (local)
+  - url: http://localhost:8002
+    description: Nodo 2 (local)
+  - url: http://localhost:8003
+    description: Nodo 3 (local)
+
+tags:
+  - name: Cadena
+    description: Consulta del estado de la blockchain local
+  - name: Transacciones
+    description: Gestión de grados académicos pendientes de minar
+  - name: Minado
+    description: Proceso de Proof of Work y generación de bloques
+  - name: Nodos
+    description: Registro de peers y algoritmo de consenso
+  - name: Sistema
+    description: Estado general del nodo
+
+paths:
+
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Estado del nodo
+      description: Retorna información general del nodo — ID, puerto, número de bloques, transacciones pendientes y peers registrados.
+      responses:
+        '200':
+          description: Nodo operativo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                nodeId: nodo-1
+                port: "8001"
+                bloques: 3
+                pendientes: 1
+                peers:
+                  - http://localhost:8002
+                  - http://localhost:8003
+
+  /chain:
+    get:
+      tags: [Cadena]
+      summary: Obtener la cadena completa
+      description: |
+        Retorna todos los bloques de la cadena local en orden cronológico,
+        incluyendo el bloque génesis. Usado por otros nodos para el algoritmo
+        de consenso en GET /nodes/resolve.
+      responses:
+        '200':
+          description: Cadena completa del nodo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainResponse'
+              example:
+                length: 2
+                chain:
+                  - index: 0
+                    timestamp: 1774481949941
+                    hashActual: "d93239b68ca7097a6cc24e732957dbc086efc4d51a3e43fa8db5712620276cb0"
+                    hashAnterior: "0"
+                    nonce: 0
+                    data:
+                      mensaje: "Bloque Génesis - Red Blockchain Grados Académicos"
+                  - index: 1
+                    timestamp: 1774482009507
+                    hashActual: "0006d17b1fa16d65dee2a3312562c01f4f378b395401c6602ddf4d97760a790b"
+                    hashAnterior: "d93239b68ca7097a6cc24e732957dbc086efc4d51a3e43fa8db5712620276cb0"
+                    nonce: 96
+                    data:
+                      minadoPor: "nodo-1"
+                      transacciones:
+                        - id: "e3783519-2265-49ba-a8f7-a3878f477f17"
+                          personaId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                          tituloObtenido: "Ingeniero en Sistemas Computacionales"
+                          fechaFin: "2024-06-15"
+                          firmadoPor: "nodo-1"
+
+  /transactions:
+    post:
+      tags: [Transacciones]
+      summary: Registrar un nuevo grado académico
+      description: |
+        Recibe los datos de un grado académico, lo agrega a la lista de
+        transacciones pendientes de este nodo y lo propaga automáticamente
+        a todos los peers registrados.
+
+        El header `X-Propagated: true` evita re-propagación infinita entre nodos.
+      parameters:
+        - in: header
+          name: X-Propagated
+          schema:
+            type: string
+            enum: ["true", "false"]
+          required: false
+          description: Indica si la transacción ya fue propagada por otro nodo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransaccionInput'
+            example:
+              personaId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+              institucionId: "11111111-1111-1111-1111-111111111111"
+              programaId: "33333333-3333-3333-3333-333333333333"
+              tituloObtenido: "Ingeniero en Sistemas Computacionales"
+              fechaFin: "2024-06-15"
+              numeroCedula: "12345678"
+              firmadoPor: "nodo-1"
+      responses:
+        '201':
+          description: Transacción agregada y propagada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransaccionResponse'
+        '400':
+          description: Campos requeridos faltantes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "Campos requeridos: personaId, tituloObtenido"
+
+  /mine:
+    post:
+      tags: [Minado]
+      summary: Minar un nuevo bloque
+      description: |
+        Empaqueta todas las transacciones pendientes en un nuevo bloque,
+        ejecuta el algoritmo Proof of Work (hash con N ceros iniciales según
+        dificultad configurada) y propaga el bloque resultante a todos los peers.
+
+        Los peers validan el bloque recibido verificando:
+        - Que el hash anterior coincide con su último bloque
+        - Que el hash cumple la dificultad de PoW
+      responses:
+        '200':
+          description: Bloque minado y propagado exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MineResponse'
+              example:
+                mensaje: "Bloque minado y propagado"
+                nodosMine: "nodo-1"
+                propagadoA:
+                  - "http://localhost:8002"
+                bloque:
+                  index: 1
+                  timestamp: 1774482009507
+                  hashActual: "0006d17b1fa16d65dee2a3312562c01f4f378b395401c6602ddf4d97760a790b"
+                  hashAnterior: "d93239b68ca7097a6cc24e732957dbc086efc4d51a3e43fa8db5712620276cb0"
+                  nonce: 96
+                  data:
+                    minadoPor: "nodo-1"
+                    transacciones: []
+        '400':
+          description: No hay transacciones pendientes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "No hay transacciones pendientes para minar"
+
+  /nodes/register:
+    post:
+      tags: [Nodos]
+      summary: Registrar peers en la red
+      description: |
+        Registra una o más direcciones de otros nodos como peers conocidos.
+        Los peers se persisten en Supabase para sobrevivir reinicios del nodo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nodos]
+              properties:
+                nodos:
+                  type: array
+                  items:
+                    type: string
+                    format: uri
+                  description: Lista de URLs de los nodos a registrar
+            example:
+              nodos:
+                - "http://localhost:8002"
+                - "http://localhost:8003"
+      responses:
+        '200':
+          description: Nodos registrados exitosamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodesRegisterResponse'
+        '400':
+          description: Array de nodos inválido o vacío
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nodes:
+    get:
+      tags: [Nodos]
+      summary: Listar peers registrados
+      description: Retorna la lista de todos los nodos peers actualmente conocidos por este nodo.
+      responses:
+        '200':
+          description: Lista de peers activos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodos:
+                    type: array
+                    items:
+                      type: string
+                      format: uri
+              example:
+                nodos:
+                  - "http://localhost:8002"
+                  - "http://localhost:8003"
+
+  /nodes/resolve:
+    get:
+      tags: [Nodos]
+      summary: Resolver conflictos — algoritmo de consenso
+      description: |
+        Implementa el algoritmo de consenso de cadena más larga válida.
+
+        El nodo consulta GET /chain de todos sus peers, valida cada cadena
+        recibida y adopta la más larga si supera a la local. Esto resuelve
+        conflictos generados cuando dos nodos minan simultáneamente.
+
+        Una cadena es válida si:
+        - Cada bloque tiene el hash correcto (SHA256 recalculado)
+        - Cada bloque apunta al hash anterior correcto
+        - Cada bloque cumple la dificultad de Proof of Work
+      responses:
+        '200':
+          description: Resultado del algoritmo de consenso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolveResponse'
+              examples:
+                reemplazada:
+                  summary: Cadena reemplazada
+                  value:
+                    mensaje: "Cadena reemplazada por una más larga"
+                    reemplazada: true
+                    longitud: 5
+                mantenida:
+                  summary: Cadena local es la más larga
+                  value:
+                    mensaje: "Cadena local es la más larga"
+                    reemplazada: false
+                    longitud: 5
+                sin_peers:
+                  summary: Sin peers registrados
+                  value:
+                    mensaje: "Sin peers registrados, cadena local mantenida"
+                    reemplazada: false
+
+  /nodes/block:
+    post:
+      tags: [Nodos]
+      summary: Recibir bloque propagado por un peer
+      description: |
+        Endpoint interno usado por otros nodos para propagar bloques recién minados.
+        El nodo receptor valida el bloque antes de aceptarlo:
+        - Verifica que el hash anterior coincide con su último bloque
+        - Verifica que el hash cumple la dificultad de PoW
+
+        Si el hash anterior no coincide, retorna 409 indicando un conflicto
+        que debe resolverse con GET /nodes/resolve.
+      parameters:
+        - in: header
+          name: X-Propagated
+          schema:
+            type: string
+            enum: ["true"]
+          required: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bloque]
+              properties:
+                bloque:
+                  $ref: '#/components/schemas/Bloque'
+      responses:
+        '200':
+          description: Bloque aceptado y agregado a la cadena
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensaje:
+                    type: string
+                  bloque:
+                    $ref: '#/components/schemas/Bloque'
+        '400':
+          description: Bloque inválido — no cumple PoW
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Conflicto de cadena — hash anterior no coincide
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "El hash anterior no coincide — posible conflicto, usa /nodes/resolve"
+
+components:
+  schemas:
+
+    Bloque:
+      type: object
+      properties:
+        index:
+          type: integer
+          description: Posición del bloque en la cadena
+        timestamp:
+          type: integer
+          format: int64
+          description: Unix timestamp en milisegundos
+        hashActual:
+          type: string
+          description: SHA256 del bloque completo
+        hashAnterior:
+          type: string
+          description: Hash del bloque previo — garantiza el encadenamiento
+        nonce:
+          type: integer
+          description: Número encontrado por Proof of Work
+        data:
+          type: object
+          description: Contenido del bloque (transacciones académicas o mensaje génesis)
+
+    Transaccion:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        personaId:
+          type: string
+          format: uuid
+        institucionId:
+          type: string
+          format: uuid
+        programaId:
+          type: string
+          format: uuid
+        tituloObtenido:
+          type: string
+        fechaFin:
+          type: string
+          format: date
+        numeroCedula:
+          type: string
+          nullable: true
+        tituloTesis:
+          type: string
+          nullable: true
+        menciones:
+          type: string
+          nullable: true
+        firmadoPor:
+          type: string
+        creadoEn:
+          type: string
+          format: date-time
+
+    TransaccionInput:
+      type: object
+      required:
+        - personaId
+        - institucionId
+        - programaId
+        - tituloObtenido
+        - fechaFin
+        - firmadoPor
+      properties:
+        personaId:
+          type: string
+          format: uuid
+        institucionId:
+          type: string
+          format: uuid
+        programaId:
+          type: string
+          format: uuid
+        tituloObtenido:
+          type: string
+          example: "Ingeniero en Sistemas Computacionales"
+        fechaFin:
+          type: string
+          format: date
+          example: "2024-06-15"
+        numeroCedula:
+          type: string
+          nullable: true
+          example: "12345678"
+        tituloTesis:
+          type: string
+          nullable: true
+        menciones:
+          type: string
+          nullable: true
+        firmadoPor:
+          type: string
+          example: "nodo-1"
+
+    TransaccionResponse:
+      type: object
+      properties:
+        mensaje:
+          type: string
+        transaccion:
+          $ref: '#/components/schemas/Transaccion'
+        propagada:
+          type: boolean
+        indiceBloque:
+          type: integer
+
+    ChainResponse:
+      type: object
+      properties:
+        chain:
+          type: array
+          items:
+            $ref: '#/components/schemas/Bloque'
+        length:
+          type: integer
+
+    MineResponse:
+      type: object
+      properties:
+        mensaje:
+          type: string
+        bloque:
+          $ref: '#/components/schemas/Bloque'
+        nodosMine:
+          type: string
+        propagadoA:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    NodesRegisterResponse:
+      type: object
+      properties:
+        mensaje:
+          type: string
+        nodosActivos:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    ResolveResponse:
+      type: object
+      properties:
+        mensaje:
+          type: string
+        reemplazada:
+          type: boolean
+        longitud:
+          type: integer
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        nodeId:
+          type: string
+        port:
+          type: string
+        bloques:
+          type: integer
+        pendientes:
+          type: integer
+        peers:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string

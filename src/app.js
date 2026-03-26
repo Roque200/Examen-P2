@@ -9,6 +9,10 @@ const mineRoutes        = require('./routes/mine')
 const transactionRoutes = require('./routes/transactions')
 const nodeRoutes        = require('./routes/nodes')
 
+const swaggerUi   = require('swagger-ui-express')
+const YAML        = require('yamljs')
+const swaggerDoc  = YAML.load('./swagger.yaml')
+
 async function startServer() {
   const app  = express()
   const PORT = process.env.PORT || 8001
@@ -25,7 +29,8 @@ async function startServer() {
   app.use('/mine',         mineRoutes)
   app.use('/transactions', transactionRoutes)
   app.use('/nodes',        nodeRoutes)
-
+  app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc))
+  
   app.get('/health', (req, res) => {
     res.json({
       status:     'ok',
