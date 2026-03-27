@@ -9,6 +9,7 @@ const router  = express.Router()
 router.post('/', async (req, res) => {
   const blockchain = req.app.get('blockchain')
   const nodeId     = process.env.NODE_ID || 'nodo-desconocido'
+  
 
   try {
     // CORRECCIÓN: blockchain.minar() es async (persiste en Supabase),

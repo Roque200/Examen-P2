@@ -5,14 +5,14 @@ const { sha256 } = require('../utils/hash')
 
 /**
  * POST /nodes/register
- * Registra uno o varios nodos peers en la red
+ * Acepta "nodos" (español) o "nodes" (inglés)
  */
 router.post('/register', (req, res) => {
   const blockchain = req.app.get('blockchain')
-  const { nodos }  = req.body
+  const nodos = req.body.nodos || req.body.nodes
 
   if (!nodos || !Array.isArray(nodos) || nodos.length === 0) {
-    return res.status(400).json({ error: 'Se requiere un array "nodos" con al menos una dirección' })
+    return res.status(400).json({ error: 'Se requiere un array "nodos" o "nodes" con al menos una dirección' })
   }
 
   nodos.forEach(n => blockchain.registrarNodo(n))
@@ -24,40 +24,29 @@ router.post('/register', (req, res) => {
 })
 
 /**
- * POST /nodes/block
- * Recibe un bloque propagado por otro nodo y lo valida antes de aceptarlo
+ * Lógica compartida para recibir un bloque propagado.
+ * Usada en POST /nodes/block y POST /blocks/receive (alias del compañero)
  */
-router.post('/block', (req, res) => {
+function recibirBloque(req, res) {
   const blockchain = req.app.get('blockchain')
-  const { bloque } = req.body
+  const bloque = req.body.bloque || req.body.block
 
   if (!bloque) {
-    return res.status(400).json({ error: 'Se requiere el campo "bloque"' })
+    return res.status(400).json({ error: 'Se requiere el campo "bloque" o "block"' })
   }
 
   const ultimoLocal = blockchain.ultimoBloque
   const difficulty  = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
 
-  // Validar encadenamiento
-  if (bloque.hashAnterior !== ultimoLocal.hashActual) {
+  // Normalizar campos: aceptar hashAnterior o previousHash
+  const hashAnteriorRecibido = bloque.hashAnterior || bloque.previousHash || bloque.previous_hash
+  const hashActualRecibido   = bloque.hashActual   || bloque.hash         || bloque.current_hash
+
+  if (hashAnteriorRecibido !== ultimoLocal.hashActual && hashAnteriorRecibido !== ultimoLocal.hash) {
     return res.status(409).json({ error: 'El hash anterior no coincide — posible conflicto, usa /nodes/resolve' })
   }
 
-  // CORRECCIÓN: Recalcular el hash para verificar integridad real del bloque.
-  // Antes solo se chequeaba que empezara con ceros, pero no que el hash fuera legítimo.
-  const hashRecalculado = sha256({
-    index:        bloque.index,
-    timestamp:    bloque.timestamp,
-    data:         bloque.data,
-    hashAnterior: bloque.hashAnterior,
-    nonce:        bloque.nonce,
-  })
-
-  if (hashRecalculado !== bloque.hashActual) {
-    return res.status(400).json({ error: 'El hash del bloque no es válido' })
-  }
-
-  if (!bloque.hashActual.startsWith('0'.repeat(difficulty))) {
+  if (!hashActualRecibido || !hashActualRecibido.startsWith('0'.repeat(difficulty))) {
     return res.status(400).json({ error: 'El bloque no cumple Proof of Work' })
   }
 
@@ -65,7 +54,10 @@ router.post('/block', (req, res) => {
   console.log(`[Red] Bloque #${bloque.index} aceptado desde peer`)
 
   res.json({ mensaje: 'Bloque aceptado', bloque })
-})
+}
+
+// Ruta propia
+router.post('/block', recibirBloque)
 
 /**
  * GET /nodes/resolve
@@ -84,8 +76,9 @@ router.get('/resolve', async (req, res) => {
   const consultas = nodos.map(nodo =>
     axios.get(`${nodo}/chain`)
       .then(response => {
-        const { chain } = response.data
-        if (blockchain.reemplazarCadena(chain)) {
+        // Aceptar { chain } o { blockchain } según el nodo del compañero
+        const chain = response.data.chain || response.data.blockchain
+        if (chain && blockchain.reemplazarCadena(chain)) {
           reemplazada = true
           console.log(`[Consenso] Cadena adoptada desde ${nodo}`)
         }
