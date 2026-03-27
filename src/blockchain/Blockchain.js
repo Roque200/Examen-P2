@@ -1,7 +1,89 @@
-const Block = require('./Block')
+const Block       = require('./Block')
 const Transaction = require('./Transaction')
+const crypto      = require('crypto')
 
-const DIFFICULTY = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
+const DIFFICULTY   = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
+const PROOF_PREFIX = '0'.repeat(DIFFICULTY)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers para detectar y validar el formato del compañero
+// ─────────────────────────────────────────────────────────────────────────────
+
+function esFormatoCompanero(bloque) {
+  return !!(bloque.persona_id || bloque.institucion_id || bloque.titulo_obtenido)
+}
+
+function normalizarHash(bloque) {
+  return {
+    hashAnterior: bloque.hash_anterior || bloque.hashAnterior || bloque.previousHash,
+    hashActual:   bloque.hash_actual   || bloque.hashActual   || bloque.hash,
+  }
+}
+
+function calcularHashCompanero({ persona_id, institucion_id, titulo_obtenido, fecha_fin, hash_anterior, nonce }) {
+  const data = `${persona_id}${institucion_id}${titulo_obtenido}${fecha_fin}${hash_anterior}${nonce}`
+  return crypto.createHash('sha256').update(data).digest('hex')
+}
+
+/**
+ * Valida una cadena sin importar si es nuestro formato o el del compañero.
+ * Para cadenas del compañero usa su fórmula de hash; para las nuestras, la nuestra.
+ */
+function esValidaCadenaExterna(chain) {
+  if (!Array.isArray(chain) || chain.length === 0) return false
+
+  for (let i = 0; i < chain.length; i++) {
+    const bloque   = chain[i]
+    const anterior = chain[i - 1]
+
+    const { hashAnterior, hashActual } = normalizarHash(bloque)
+
+    if (!hashActual || !hashActual.startsWith(PROOF_PREFIX)) {
+      console.warn(`[Validacion externa] PoW inválido en bloque ${i}`)
+      return false
+    }
+
+    if (esFormatoCompanero(bloque)) {
+      // Verificar con la fórmula del compañero
+      const hashRecalculado = calcularHashCompanero({
+        persona_id:      bloque.persona_id,
+        institucion_id:  bloque.institucion_id,
+        titulo_obtenido: bloque.titulo_obtenido,
+        fecha_fin:       bloque.fecha_fin,
+        hash_anterior:   bloque.hash_anterior,
+        nonce:           bloque.nonce,
+      })
+      if (hashRecalculado !== hashActual) {
+        console.warn(`[Validacion externa] Hash inválido (fórmula compañero) en bloque ${i}`)
+        return false
+      }
+    } else {
+      // Verificar con nuestra fórmula
+      const bloqueRecalculado = new Block(
+        bloque.index,
+        bloque.timestamp,
+        bloque.data,
+        bloque.hashAnterior,
+        bloque.nonce
+      )
+      if (bloqueRecalculado.hashActual !== hashActual) {
+        console.warn(`[Validacion externa] Hash inválido (fórmula propia) en bloque ${i}`)
+        return false
+      }
+    }
+
+    // Verificar encadenamiento (excepto primer bloque)
+    if (i > 0) {
+      const { hashActual: hashActualAnterior } = normalizarHash(anterior)
+      if (hashAnterior !== hashActualAnterior) {
+        console.warn(`[Validacion externa] Encadenamiento roto en bloque ${i}`)
+        return false
+      }
+    }
+  }
+
+  return true
+}
 
 class Blockchain {
   constructor() {
@@ -10,11 +92,6 @@ class Blockchain {
     this.nodos = new Set()
   }
 
-  /**
-   * Inicializa la cadena cargando desde Supabase.
-   * Si no hay bloques persistidos, crea el génesis.
-   * Se debe llamar con await antes de arrancar el servidor.
-   */
   async inicializar() {
     const { cargarCadena, cargarPeers } = require('../db/grados')
 
@@ -36,7 +113,7 @@ class Blockchain {
     }
   }
 
-  // ─── Bloque génesis ──────────────────────────────────────────────────────────
+  // ─── Bloque génesis ────────────────────────────────────────────────────────
 
   _crearBloqueGenesis() {
     const genesis = new Block(
@@ -50,18 +127,18 @@ class Blockchain {
     console.log(`[Blockchain] Bloque génesis creado: ${genesis.hashActual}`)
   }
 
-  // ─── Getters ─────────────────────────────────────────────────────────────────
+  // ─── Getters ───────────────────────────────────────────────────────────────
 
   get ultimoBloque() {
     return this.chain[this.chain.length - 1]
   }
 
-  // ─── Proof of Work ───────────────────────────────────────────────────────────
+  // ─── Proof of Work ─────────────────────────────────────────────────────────
 
   proofOfWork(data) {
     const index        = this.chain.length
     const timestamp    = Date.now()
-    const hashAnterior = this.ultimoBloque.hashActual
+    const hashAnterior = normalizarHash(this.ultimoBloque).hashActual
     let nonce = 0
 
     console.log(`[PoW] Minando bloque #${index} con dificultad ${DIFFICULTY}...`)
@@ -76,7 +153,7 @@ class Blockchain {
     return bloque
   }
 
-  // ─── Minado ──────────────────────────────────────────────────────────────────
+  // ─── Minado ────────────────────────────────────────────────────────────────
 
   async minar(nodeId) {
     if (this.transaccionesPendientes.length === 0) {
@@ -92,7 +169,6 @@ class Blockchain {
     this.chain.push(bloque)
     this.transaccionesPendientes = []
 
-    // Persistir en Supabase de forma no bloqueante
     const { persistirBloque } = require('../db/grados')
     persistirBloque(bloque, nodeId).catch(err =>
       console.error('[Blockchain] Error de persistencia:', err.message)
@@ -101,7 +177,7 @@ class Blockchain {
     return bloque
   }
 
-  // ─── Transacciones ───────────────────────────────────────────────────────────
+  // ─── Transacciones ─────────────────────────────────────────────────────────
 
   agregarTransaccion(datosGrado) {
     const tx = new Transaction(datosGrado)
@@ -110,7 +186,7 @@ class Blockchain {
     return tx
   }
 
-  // ─── Validación ──────────────────────────────────────────────────────────────
+  // ─── Validación (cadena propia) ────────────────────────────────────────────
 
   esValida(chain = this.chain) {
     for (let i = 1; i < chain.length; i++) {
@@ -140,21 +216,26 @@ class Blockchain {
     return true
   }
 
-  // ─── Consenso ────────────────────────────────────────────────────────────────
+  // ─── Consenso ──────────────────────────────────────────────────────────────
 
+  /**
+   * Reemplaza la cadena local si la externa es más larga y válida.
+   *
+   * Usa esValidaCadenaExterna() en lugar de esValida() para poder aceptar
+   * cadenas del compañero (que usan una fórmula de hash diferente).
+   */
   reemplazarCadena(cadenaExterna) {
-    if (cadenaExterna.length > this.chain.length && this.esValida(cadenaExterna)) {
+    if (
+      cadenaExterna.length > this.chain.length &&
+      esValidaCadenaExterna(cadenaExterna)
+    ) {
       console.log(`[Consenso] Cadena reemplazada: ${this.chain.length} → ${cadenaExterna.length} bloques`)
 
-      // CORRECCIÓN: Persistir los bloques nuevos que no teníamos.
-      // Antes se reemplazaba la cadena en memoria pero Supabase quedaba desactualizado,
-      // por lo que al reiniciar el nodo perdía los bloques adoptados del consenso.
       const { persistirBloque } = require('../db/grados')
       const nodeId = process.env.NODE_ID || 'nodo-1'
       const indicesLocales = new Set(this.chain.map(b => b.index))
 
       cadenaExterna.forEach(bloque => {
-        // Solo persistir bloques que no teníamos y que tengan transacciones académicas
         if (!indicesLocales.has(bloque.index) && bloque.data?.transacciones?.length > 0) {
           persistirBloque(bloque, nodeId).catch(err =>
             console.error(`[Consenso] Error al persistir bloque #${bloque.index}:`, err.message)
@@ -168,7 +249,7 @@ class Blockchain {
     return false
   }
 
-  // ─── Nodos ───────────────────────────────────────────────────────────────────
+  // ─── Nodos ─────────────────────────────────────────────────────────────────
 
   registrarNodo(direccion) {
     const dir = direccion.replace(/\/$/, '')
