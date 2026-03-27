@@ -1,6 +1,7 @@
 const express = require('express')
 const axios   = require('axios')
 const router  = express.Router()
+const { sha256 } = require('../utils/hash')
 
 /**
  * POST /nodes/register
@@ -35,13 +36,28 @@ router.post('/block', (req, res) => {
   }
 
   const ultimoLocal = blockchain.ultimoBloque
+  const difficulty  = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
 
-  // Validaciones básicas del bloque recibido
+  // Validar encadenamiento
   if (bloque.hashAnterior !== ultimoLocal.hashActual) {
     return res.status(409).json({ error: 'El hash anterior no coincide — posible conflicto, usa /nodes/resolve' })
   }
 
-  if (!bloque.hashActual.startsWith('0'.repeat(parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')))) {
+  // CORRECCIÓN: Recalcular el hash para verificar integridad real del bloque.
+  // Antes solo se chequeaba que empezara con ceros, pero no que el hash fuera legítimo.
+  const hashRecalculado = sha256({
+    index:        bloque.index,
+    timestamp:    bloque.timestamp,
+    data:         bloque.data,
+    hashAnterior: bloque.hashAnterior,
+    nonce:        bloque.nonce,
+  })
+
+  if (hashRecalculado !== bloque.hashActual) {
+    return res.status(400).json({ error: 'El hash del bloque no es válido' })
+  }
+
+  if (!bloque.hashActual.startsWith('0'.repeat(difficulty))) {
     return res.status(400).json({ error: 'El bloque no cumple Proof of Work' })
   }
 

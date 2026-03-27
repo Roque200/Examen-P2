@@ -35,6 +35,7 @@ class Blockchain {
       console.log(`[Blockchain] ${peersPersistidos.length} peer(s) restaurados desde Supabase`)
     }
   }
+
   // ─── Bloque génesis ──────────────────────────────────────────────────────────
 
   _crearBloqueGenesis() {
@@ -58,8 +59,8 @@ class Blockchain {
   // ─── Proof of Work ───────────────────────────────────────────────────────────
 
   proofOfWork(data) {
-    const index = this.chain.length
-    const timestamp = Date.now()
+    const index        = this.chain.length
+    const timestamp    = Date.now()
     const hashAnterior = this.ultimoBloque.hashActual
     let nonce = 0
 
@@ -113,7 +114,7 @@ class Blockchain {
 
   esValida(chain = this.chain) {
     for (let i = 1; i < chain.length; i++) {
-      const actual = chain[i]
+      const actual   = chain[i]
       const anterior = chain[i - 1]
 
       const bloqueRecalculado = new Block(
@@ -144,6 +145,23 @@ class Blockchain {
   reemplazarCadena(cadenaExterna) {
     if (cadenaExterna.length > this.chain.length && this.esValida(cadenaExterna)) {
       console.log(`[Consenso] Cadena reemplazada: ${this.chain.length} → ${cadenaExterna.length} bloques`)
+
+      // CORRECCIÓN: Persistir los bloques nuevos que no teníamos.
+      // Antes se reemplazaba la cadena en memoria pero Supabase quedaba desactualizado,
+      // por lo que al reiniciar el nodo perdía los bloques adoptados del consenso.
+      const { persistirBloque } = require('../db/grados')
+      const nodeId = process.env.NODE_ID || 'nodo-1'
+      const indicesLocales = new Set(this.chain.map(b => b.index))
+
+      cadenaExterna.forEach(bloque => {
+        // Solo persistir bloques que no teníamos y que tengan transacciones académicas
+        if (!indicesLocales.has(bloque.index) && bloque.data?.transacciones?.length > 0) {
+          persistirBloque(bloque, nodeId).catch(err =>
+            console.error(`[Consenso] Error al persistir bloque #${bloque.index}:`, err.message)
+          )
+        }
+      })
+
       this.chain = cadenaExterna
       return true
     }

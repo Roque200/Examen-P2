@@ -11,7 +11,9 @@ router.post('/', async (req, res) => {
   const nodeId     = process.env.NODE_ID || 'nodo-desconocido'
 
   try {
-    const bloque = blockchain.minar(nodeId)
+    // CORRECCIÓN: blockchain.minar() es async (persiste en Supabase),
+    // sin await el bloque se propagaba antes de terminar el PoW
+    const bloque = await blockchain.minar(nodeId)
 
     // Propagar bloque minado a todos los peers
     const nodos = blockchain.getNodos()
