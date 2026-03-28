@@ -2,6 +2,7 @@ require('dotenv').config()
 
 const express    = require('express')
 const crypto     = require('crypto')
+const path       = require('path')
 const Blockchain = require('./blockchain/Blockchain')
 const logger     = require('./middleware/logger')
 
@@ -19,21 +20,33 @@ const DIFFICULTY   = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
 const PROOF_PREFIX = '0'.repeat(DIFFICULTY)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helpers de compatibilidad
+//  Helpers de compatibilidad entre formatos de bloque
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Detecta si el bloque viene en el formato plano del compañero
+ * (campos snake_case directos: persona_id, titulo_obtenido, etc.)
+ * en lugar de nuestro formato { index, timestamp, data: { transacciones } }
+ */
 function esFormatoCompanero(bloque) {
   return !!(bloque.persona_id || bloque.institucion_id || bloque.titulo_obtenido)
 }
 
+/**
+ * Calcula el hash según la fórmula exacta del compañero:
+ * SHA256(persona_id + institucion_id + titulo_obtenido + fecha_fin + hash_anterior + nonce)
+ * Cuando hash_anterior es null, JavaScript lo convierte a "null" en el template literal,
+ * igual que lo hace el código del compañero.
+ */
 function calcularHashCompanero({ persona_id, institucion_id, titulo_obtenido, fecha_fin, hash_anterior, nonce }) {
   const data = `${persona_id}${institucion_id}${titulo_obtenido}${fecha_fin}${hash_anterior}${nonce}`
   return crypto.createHash('sha256').update(data).digest('hex')
 }
 
 /**
- * Extrae hashAnterior y hashActual normalizados.
- * Para el compañero usa snake_case, para nosotros camelCase.
+ * Extrae hashAnterior y hashActual sin importar el formato del bloque.
+ * Nuestro formato: hashAnterior / hashActual (camelCase)
+ * Formato compañero: hash_anterior / hash_actual (snake_case)
  */
 function normalizarCamposHash(bloque) {
   return {
@@ -42,6 +55,10 @@ function normalizarCamposHash(bloque) {
   }
 }
 
+/**
+ * Valida el Proof of Work de un bloque recibido.
+ * Usa la fórmula correcta según el formato detectado.
+ */
 function validarPoWBloque(bloque) {
   const { hashActual } = normalizarCamposHash(bloque)
   if (!hashActual) return false
@@ -52,7 +69,7 @@ function validarPoWBloque(bloque) {
       institucion_id:  bloque.institucion_id,
       titulo_obtenido: bloque.titulo_obtenido,
       fecha_fin:       bloque.fecha_fin,
-      hash_anterior:   bloque.hash_anterior,  // puede ser null — se convierte a "null" en el string
+      hash_anterior:   bloque.hash_anterior,
       nonce:           bloque.nonce,
     })
     const valido = hashRecalculado === hashActual && hashActual.startsWith(PROOF_PREFIX)
@@ -63,13 +80,19 @@ function validarPoWBloque(bloque) {
     return valido
   }
 
+  // Nuestro formato: solo verificar prefijo de ceros
   return hashActual.startsWith(PROOF_PREFIX)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Función central de recepción de bloques
+//  Función central de recepción de bloques propagados
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Acepta bloques de cualquier peer con cualquier formato:
+ * 1. Nuestro nodo (mine.js)  → body = { bloque: { index, hashActual, ... } }
+ * 2. Nodo del compañero      → body = { persona_id, hash_actual, ... }  (directo)
+ */
 function procesarBloqueRecibido(req, res, blockchain) {
   const body = req.body
 
@@ -90,15 +113,8 @@ function procesarBloqueRecibido(req, res, blockchain) {
   console.log(`[Bloque recibido] último hash local: ${hashActualLocal}`)
 
   // ── Validar encadenamiento ────────────────────────────────────────────────
-  //
-  // CASO ESPECIAL — primer bloque del compañero (hash_anterior = null):
-  // Su cadena no tiene génesis. Su primer bloque apunta a null.
-  // Nosotros sí tenemos génesis, así que los hashes nunca coincidirían.
-  //
-  // Solución: si el hashAnterior recibido es null/undefined Y el bloque
-  // cumple PoW válido, lo aceptamos como "bloque ancla" del compañero
-  // y sincronizamos desde ahí.
-  //
+  // CASO ESPECIAL: el primer bloque del compañero tiene hash_anterior = null
+  // porque su cadena no tiene bloque génesis. Lo aceptamos si cumple PoW.
   const hashAnteriorEsNulo = hashAnterior === null || hashAnterior === undefined
 
   if (!hashAnteriorEsNulo && hashAnterior !== hashActualLocal) {
@@ -119,18 +135,17 @@ function procesarBloqueRecibido(req, res, blockchain) {
   console.log(`[Red] Bloque aceptado desde peer`)
 
   // ── Persistir en Supabase ─────────────────────────────────────────────────
-  // Si es formato del compañero (bloque plano con campos snake_case),
-  // lo insertamos directamente en la tabla grados.
-  // Si es nuestro formato (bloque con data.transacciones), usamos persistirBloque.
   if (esFormatoCompanero(bloque)) {
+    // Bloque plano del compañero → insertar directo en tabla grados
     const supabase = require('./db/supabase')
-    const { id, creado_en, ...datos } = bloque  // dejar que Supabase genere id y creado_en
+    const { id, creado_en, ...datos } = bloque
     supabase.from('grados').insert(datos)
       .then(({ error }) => {
         if (error) console.error('[DB] Error al persistir bloque del compañero:', error.message)
         else console.log(`[DB] Bloque del compañero persistido: ${bloque.hash_actual?.slice(0, 16)}...`)
       })
   } else {
+    // Nuestro formato → usar persistirBloque normal
     const { persistirBloque } = require('./db/grados')
     const nodeId = process.env.NODE_ID || 'nodo-1'
     persistirBloque(bloque, nodeId)
@@ -141,7 +156,7 @@ function procesarBloqueRecibido(req, res, blockchain) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Arranque
+//  Arranque del servidor
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function startServer() {
@@ -156,19 +171,28 @@ async function startServer() {
   app.use(cors())
   app.use(logger)
 
+  // ── Frontend estático ─────────────────────────────────────────────────────
+  // Sirve los archivos de la carpeta public/ en la raíz del proyecto
+  // Acceder en: http://localhost:8001/
+  app.use(express.static(path.join(__dirname, '../public')))
+
+  // ── Rutas API ─────────────────────────────────────────────────────────────
   app.use('/chain',        chainRoutes)
   app.use('/mine',         mineRoutes)
   app.use('/transactions', transactionRoutes)
   app.use('/nodes',        nodeRoutes)
   app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc))
 
-  // Todos los endpoints que el compañero puede intentar
+  // ── Endpoints de recepción de bloques ────────────────────────────────────
+  // El compañero prueba estos endpoints en orden hasta encontrar uno que responda.
+  // Todos usan la misma lógica de validación dual.
   app.post('/block',          (req, res) => procesarBloqueRecibido(req, res, blockchain))
   app.post('/blocks/receive', (req, res) => procesarBloqueRecibido(req, res, blockchain))
   app.post('/blocks',         (req, res) => procesarBloqueRecibido(req, res, blockchain))
   app.post('/chain/receive',  (req, res) => procesarBloqueRecibido(req, res, blockchain))
   app.post('/receive-block',  (req, res) => procesarBloqueRecibido(req, res, blockchain))
 
+  // ── Health check ──────────────────────────────────────────────────────────
   app.get('/health', (req, res) => {
     res.json({
       status:     'ok',
@@ -180,10 +204,12 @@ async function startServer() {
     })
   })
 
+  // ── 404 ───────────────────────────────────────────────────────────────────
   app.use((req, res) => {
     res.status(404).json({ error: `Ruta ${req.method} ${req.path} no encontrada` })
   })
 
+  // ── Error handler ─────────────────────────────────────────────────────────
   app.use((err, req, res, next) => {
     console.error(`[Error] ${err.message}`)
     res.status(500).json({ error: 'Error interno del servidor' })
@@ -191,9 +217,11 @@ async function startServer() {
 
   app.listen(PORT, () => {
     console.log(`\n Nodo blockchain corriendo`)
-    console.log(`   NODE_ID : ${process.env.NODE_ID || 'nodo-1'}`)
-    console.log(`   Puerto  : ${PORT}`)
-    console.log(`   PoW     : ${PROOF_PREFIX}...\n`)
+    console.log(`   NODE_ID  : ${process.env.NODE_ID || 'nodo-1'}`)
+    console.log(`   Puerto   : ${PORT}`)
+    console.log(`   PoW      : ${PROOF_PREFIX}...`)
+    console.log(`   Frontend : http://localhost:${PORT}/`)
+    console.log(`   Docs     : http://localhost:${PORT}/docs\n`)
   })
 }
 

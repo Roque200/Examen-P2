@@ -7,7 +7,7 @@ const DIFFICULTY   = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
 const PROOF_PREFIX = '0'.repeat(DIFFICULTY)
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helpers de compatibilidad (mismo código que app.js para /nodes/block)
+//  Helpers de compatibilidad
 // ─────────────────────────────────────────────────────────────────────────────
 
 function esFormatoCompanero(bloque) {
@@ -16,8 +16,8 @@ function esFormatoCompanero(bloque) {
 
 function normalizarCamposHash(bloque) {
   return {
-    hashAnterior: bloque.hash_anterior || bloque.hashAnterior || bloque.previousHash || bloque.previous_hash,
-    hashActual:   bloque.hash_actual   || bloque.hashActual   || bloque.hash         || bloque.current_hash,
+    hashAnterior: bloque.hash_anterior ?? bloque.hashAnterior ?? bloque.previousHash ?? bloque.previous_hash,
+    hashActual:   bloque.hash_actual   ?? bloque.hashActual   ?? bloque.hash         ?? bloque.current_hash,
   }
 }
 
@@ -49,10 +49,6 @@ function validarPoWBloque(bloque) {
 //  POST /nodes/register
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Acepta "nodos" (español) o "nodes" (inglés) para compatibilidad con el
- * anunciarNodo() del compañero que envía { nodes: [miUrl] }.
- */
 router.post('/register', (req, res) => {
   const blockchain = req.app.get('blockchain')
   const nodos = req.body.nodos || req.body.nodes
@@ -72,13 +68,40 @@ router.post('/register', (req, res) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  DELETE /nodes/remove
+//  Elimina un peer de la lista de nodos conocidos
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.delete('/remove', (req, res) => {
+  const blockchain = req.app.get('blockchain')
+  const { url, nodo } = req.body
+  const direccion = url || nodo
+
+  if (!direccion) {
+    return res.status(400).json({ error: 'Se requiere el campo "url" con la dirección del nodo a eliminar' })
+  }
+
+  const dir = direccion.replace(/\/$/, '')
+  const existia = blockchain.nodos.has(dir)
+
+  if (!existia) {
+    return res.status(404).json({ error: `Nodo ${dir} no está registrado` })
+  }
+
+  blockchain.nodos.delete(dir)
+  console.log(`[Red] Nodo eliminado: ${dir}. Total nodos: ${blockchain.nodos.size}`)
+
+  res.json({
+    mensaje:      'Nodo eliminado',
+    eliminado:    dir,
+    nodosActivos: blockchain.getNodos(),
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  POST /nodes/block
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Recibe un bloque propagado por otro nodo de nuestra misma red interna.
- * Usa la misma lógica de validación dual que los endpoints de app.js.
- */
 router.post('/block', (req, res) => {
   const blockchain = req.app.get('blockchain')
   const body       = req.body
@@ -101,7 +124,8 @@ router.post('/block', (req, res) => {
   console.log(`[/nodes/block] hashAnterior     : ${hashAnterior}`)
   console.log(`[/nodes/block] último hash local: ${hashActualLocal}`)
 
-  if (hashAnterior !== hashActualLocal) {
+  const hashAnteriorEsNulo = hashAnterior === null || hashAnterior === undefined
+  if (!hashAnteriorEsNulo && hashAnterior !== hashActualLocal) {
     return res.status(409).json({
       error: 'El hash anterior no coincide — usa /nodes/resolve'
     })
@@ -118,23 +142,9 @@ router.post('/block', (req, res) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  GET /nodes/resolve  —  Algoritmo de consenso
+//  GET /nodes/resolve
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Consulta la cadena de todos los peers y adopta la más larga válida.
- *
- * COMPATIBILIDAD:
- * - Nuestro nodo responde GET /chain con { chain: [...], length: N }
- * - El compañero responde GET /chain con { chain: [...] }  (mismo campo, ok)
- *
- * La validación de la cadena del compañero usa esValida() de Blockchain.js,
- * que recalcula hashes con nuestra fórmula. Para cadenas del compañero esto
- * fallará, por lo que SOLO adoptamos cadenas más largas y válidas según
- * nuestro formato. Las cadenas del compañero se ignoran en el consenso
- * (son incompatibles a nivel de hash), pero sus bloques individuales sí
- * se reciben correctamente vía /block.
- */
 router.get('/resolve', async (req, res) => {
   const blockchain = req.app.get('blockchain')
   const nodos      = blockchain.getNodos()
@@ -154,7 +164,6 @@ router.get('/resolve', async (req, res) => {
         const cadena = response.data.chain || response.data.blockchain
         if (!cadena || !Array.isArray(cadena)) return
 
-        // Solo intentar reemplazar si la cadena remota es más larga
         if (cadena.length <= blockchain.chain.length) return
 
         if (blockchain.reemplazarCadena(cadena)) {
