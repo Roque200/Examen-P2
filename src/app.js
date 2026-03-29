@@ -80,7 +80,7 @@ function validarPoWBloque(bloque) {
 //  Recepción de bloques propagados por peers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function procesarBloqueRecibido(req, res, blockchain) {
+async function procesarBloqueRecibido(req, res, blockchain) {
   const body = req.body
 
   const bloque = body.bloque || body.block || (
@@ -100,13 +100,40 @@ function procesarBloqueRecibido(req, res, blockchain) {
   console.log(`[Bloque recibido] último hash local: ${hashActualLocal}`)
 
   const hashAnteriorEsNulo = hashAnterior === null || hashAnterior === undefined
+
   if (!hashAnteriorEsNulo && hashAnterior !== hashActualLocal) {
-    console.warn(`[Bloque recibido] 409 — hashAnterior no coincide`)
-    return res.status(409).json({
-      error: 'El hash anterior no coincide — usa /nodes/resolve para sincronizar',
-      hashAnteriorRecibido: hashAnterior,
-      hashActualLocal,
-    })
+    console.warn(`[Bloque recibido] hashAnterior no coincide — intentando consenso automático`)
+
+    // En lugar de rechazar, intentar sincronizar automáticamente con /nodes/resolve
+    // y luego re-evaluar si el bloque es válido
+    const axios = require('axios')
+    const nodos = blockchain.getNodos()
+
+    // Buscar si algún peer tiene una cadena donde este bloque encaje
+    let sincronizado = false
+    for (const nodo of nodos) {
+      try {
+        const { data } = await axios.get(`${nodo}/chain`, { timeout: 3000 })
+        const cadenaRemota = data.chain
+        if (cadenaRemota && cadenaRemota.length > blockchain.chain.length) {
+          if (blockchain.reemplazarCadena(cadenaRemota)) {
+            sincronizado = true
+            console.log(`[Bloque recibido] Cadena sincronizada desde ${nodo}`)
+            break
+          }
+        }
+      } catch (e) { /* peer no disponible */ }
+    }
+
+    // Recalcular último hash tras sincronización
+    const nuevoUltimo = normalizarCamposHash(blockchain.ultimoBloque)
+    if (!sincronizado && hashAnterior !== nuevoUltimo.hashActual) {
+      return res.status(409).json({
+        error: 'El hash anterior no coincide — cadenas divergentes, usa /nodes/resolve',
+        hashAnteriorRecibido: hashAnterior,
+        hashActualLocal: nuevoUltimo.hashActual,
+      })
+    }
   }
 
   if (!validarPoWBloque(bloque)) {
