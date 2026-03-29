@@ -116,6 +116,50 @@ function procesarBloqueRecibido(req, res, blockchain) {
   blockchain.chain.push(bloque)
   console.log(`[Red] Bloque aceptado desde peer`)
 
+  // ── Limpiar transacciones pendientes que ya fueron minadas por el peer ────
+  const txsEnBloque = []
+  if (esFormatoCompanero(bloque)) {
+    if (bloque.persona_id && bloque.titulo_obtenido && bloque.fecha_fin) {
+      txsEnBloque.push({
+        persona_id:      bloque.persona_id,
+        institucion_id:  bloque.institucion_id,
+        titulo_obtenido: bloque.titulo_obtenido,
+        fecha_fin:       bloque.fecha_fin,
+      })
+    }
+  } else {
+    const txs = bloque.data?.transacciones || []
+    txs.forEach(tx => {
+      txsEnBloque.push({
+        persona_id:      tx.persona_id      || tx.personaId,
+        institucion_id:  tx.institucion_id  || tx.institucionId,
+        titulo_obtenido: tx.titulo_obtenido || tx.tituloObtenido,
+        fecha_fin:       tx.fecha_fin       || tx.fechaFin,
+      })
+    })
+  }
+
+  if (txsEnBloque.length > 0) {
+    const antesCount = blockchain.transaccionesPendientes.length
+    blockchain.transaccionesPendientes = blockchain.transaccionesPendientes.filter(pendiente => {
+      const pid  = pendiente.personaId     || pendiente.persona_id     || ''
+      const iid  = pendiente.institucionId || pendiente.institucion_id || ''
+      const tit  = pendiente.tituloObtenido|| pendiente.titulo_obtenido|| ''
+      const fech = pendiente.fechaFin      || pendiente.fecha_fin      || ''
+      const yaMinada = txsEnBloque.some(enBloque =>
+        enBloque.persona_id      === pid  &&
+        enBloque.institucion_id  === iid  &&
+        enBloque.titulo_obtenido === tit  &&
+        enBloque.fecha_fin       === fech
+      )
+      return !yaMinada
+    })
+    const eliminadas = antesCount - blockchain.transaccionesPendientes.length
+    if (eliminadas > 0) {
+      console.log(`[Red] ${eliminadas} transacción(es) pendiente(s) eliminadas (ya minadas por peer)`)
+    }
+  }
+
   // Persistir en Supabase según formato
   if (esFormatoCompanero(bloque)) {
     const supabase = require('./db/supabase')
@@ -161,8 +205,8 @@ async function startServer() {
   app.use(logger)
 
   // ── Frontend estático ─────────────────────────────────────────────────────
-  // Busca public/ en la raíz del proyecto (un nivel arriba de src/)
-  const publicDir = path.join(__dirname, '..', 'public')
+  // El index.html vive en src/public/ — mismo nivel que app.js
+  const publicDir = path.join(__dirname, 'public')
   app.use(express.static(publicDir))
   console.log(`[Static] Sirviendo frontend desde: ${publicDir}`)
 
