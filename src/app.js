@@ -11,10 +11,23 @@ const mineRoutes        = require('./routes/mine')
 const transactionRoutes = require('./routes/transactions')
 const nodeRoutes        = require('./routes/nodes')
 
-const swaggerUi  = require('swagger-ui-express')
-const YAML       = require('yamljs')
-const swaggerDoc = YAML.load('./swagger.yaml')
-const cors       = require('cors')
+const cors = require('cors')
+
+// ─── Swagger: path ABSOLUTO para evitar problemas de CWD ─────────────────────
+let swaggerUi, swaggerDoc
+try {
+  swaggerUi  = require('swagger-ui-express')
+  const YAML = require('yamljs')
+  // __dirname apunta a src/, swagger.yaml está en la raíz del proyecto
+  const swaggerPath = path.join(__dirname, '..', 'swagger.yaml')
+  swaggerDoc = YAML.load(swaggerPath)
+  console.log('[Swagger] Documentación cargada correctamente')
+} catch (e) {
+  console.warn(`[Swagger] No se pudo cargar swagger.yaml: ${e.message}`)
+  console.warn('[Swagger] El servidor seguirá funcionando sin /docs')
+  swaggerUi  = null
+  swaggerDoc = null
+}
 
 const DIFFICULTY   = parseInt(process.env.PROOF_OF_WORK_DIFFICULTY || '3')
 const PROOF_PREFIX = '0'.repeat(DIFFICULTY)
@@ -23,31 +36,15 @@ const PROOF_PREFIX = '0'.repeat(DIFFICULTY)
 //  Helpers de compatibilidad entre formatos de bloque
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Detecta si el bloque viene en el formato plano del compañero
- * (campos snake_case directos: persona_id, titulo_obtenido, etc.)
- * en lugar de nuestro formato { index, timestamp, data: { transacciones } }
- */
 function esFormatoCompanero(bloque) {
   return !!(bloque.persona_id || bloque.institucion_id || bloque.titulo_obtenido)
 }
 
-/**
- * Calcula el hash según la fórmula exacta del compañero:
- * SHA256(persona_id + institucion_id + titulo_obtenido + fecha_fin + hash_anterior + nonce)
- * Cuando hash_anterior es null, JavaScript lo convierte a "null" en el template literal,
- * igual que lo hace el código del compañero.
- */
 function calcularHashCompanero({ persona_id, institucion_id, titulo_obtenido, fecha_fin, hash_anterior, nonce }) {
   const data = `${persona_id}${institucion_id}${titulo_obtenido}${fecha_fin}${hash_anterior}${nonce}`
   return crypto.createHash('sha256').update(data).digest('hex')
 }
 
-/**
- * Extrae hashAnterior y hashActual sin importar el formato del bloque.
- * Nuestro formato: hashAnterior / hashActual (camelCase)
- * Formato compañero: hash_anterior / hash_actual (snake_case)
- */
 function normalizarCamposHash(bloque) {
   return {
     hashAnterior: bloque.hash_anterior ?? bloque.hashAnterior ?? bloque.previousHash ?? bloque.previous_hash,
@@ -55,10 +52,6 @@ function normalizarCamposHash(bloque) {
   }
 }
 
-/**
- * Valida el Proof of Work de un bloque recibido.
- * Usa la fórmula correcta según el formato detectado.
- */
 function validarPoWBloque(bloque) {
   const { hashActual } = normalizarCamposHash(bloque)
   if (!hashActual) return false
@@ -80,19 +73,13 @@ function validarPoWBloque(bloque) {
     return valido
   }
 
-  // Nuestro formato: solo verificar prefijo de ceros
   return hashActual.startsWith(PROOF_PREFIX)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Función central de recepción de bloques propagados
+//  Recepción de bloques propagados por peers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Acepta bloques de cualquier peer con cualquier formato:
- * 1. Nuestro nodo (mine.js)  → body = { bloque: { index, hashActual, ... } }
- * 2. Nodo del compañero      → body = { persona_id, hash_actual, ... }  (directo)
- */
 function procesarBloqueRecibido(req, res, blockchain) {
   const body = req.body
 
@@ -108,15 +95,11 @@ function procesarBloqueRecibido(req, res, blockchain) {
   const { hashAnterior, hashActual }    = normalizarCamposHash(bloque)
   const { hashActual: hashActualLocal } = normalizarCamposHash(ultimoLocal)
 
-  console.log(`[Bloque recibido] formato         : ${esFormatoCompanero(bloque) ? 'compañero (plano)' : 'propio'}`)
-  console.log(`[Bloque recibido] hashAnterior    : ${hashAnterior}`)
+  console.log(`[Bloque recibido] formato          : ${esFormatoCompanero(bloque) ? 'compañero (plano)' : 'propio'}`)
+  console.log(`[Bloque recibido] hashAnterior     : ${hashAnterior}`)
   console.log(`[Bloque recibido] último hash local: ${hashActualLocal}`)
 
-  // ── Validar encadenamiento ────────────────────────────────────────────────
-  // CASO ESPECIAL: el primer bloque del compañero tiene hash_anterior = null
-  // porque su cadena no tiene bloque génesis. Lo aceptamos si cumple PoW.
   const hashAnteriorEsNulo = hashAnterior === null || hashAnterior === undefined
-
   if (!hashAnteriorEsNulo && hashAnterior !== hashActualLocal) {
     console.warn(`[Bloque recibido] 409 — hashAnterior no coincide`)
     return res.status(409).json({
@@ -126,7 +109,6 @@ function procesarBloqueRecibido(req, res, blockchain) {
     })
   }
 
-  // ── Validar Proof of Work ─────────────────────────────────────────────────
   if (!validarPoWBloque(bloque)) {
     return res.status(400).json({ error: 'El bloque no cumple Proof of Work' })
   }
@@ -134,18 +116,16 @@ function procesarBloqueRecibido(req, res, blockchain) {
   blockchain.chain.push(bloque)
   console.log(`[Red] Bloque aceptado desde peer`)
 
-  // ── Persistir en Supabase ─────────────────────────────────────────────────
+  // Persistir en Supabase según formato
   if (esFormatoCompanero(bloque)) {
-    // Bloque plano del compañero → insertar directo en tabla grados
     const supabase = require('./db/supabase')
     const { id, creado_en, ...datos } = bloque
     supabase.from('grados').insert(datos)
       .then(({ error }) => {
         if (error) console.error('[DB] Error al persistir bloque del compañero:', error.message)
-        else console.log(`[DB] Bloque del compañero persistido: ${bloque.hash_actual?.slice(0, 16)}...`)
+        else console.log(`[DB] Bloque del compañero persistido`)
       })
   } else {
-    // Nuestro formato → usar persistirBloque normal
     const { persistirBloque } = require('./db/grados')
     const nodeId = process.env.NODE_ID || 'nodo-1'
     persistirBloque(bloque, nodeId)
@@ -161,10 +141,19 @@ function procesarBloqueRecibido(req, res, blockchain) {
 
 async function startServer() {
   const app  = express()
-  const PORT = process.env.PORT || 8001
+  const PORT = parseInt(process.env.PORT) || 8001
 
-  const blockchain = new Blockchain()
-  await blockchain.inicializar()
+  // ── Inicializar blockchain con manejo de errores explícito ────────────────
+  let blockchain
+  try {
+    blockchain = new Blockchain()
+    await blockchain.inicializar()
+  } catch (e) {
+    console.error('[Fatal] Error al inicializar blockchain:', e.message)
+    console.error(e.stack)
+    process.exit(1)
+  }
+
   app.set('blockchain', blockchain)
 
   app.use(express.json())
@@ -172,25 +161,34 @@ async function startServer() {
   app.use(logger)
 
   // ── Frontend estático ─────────────────────────────────────────────────────
-  // Sirve los archivos de la carpeta public/ en la raíz del proyecto
-  // Acceder en: http://localhost:8001/
-  app.use(express.static(path.join(__dirname, '../public')))
+  // Busca public/ en la raíz del proyecto (un nivel arriba de src/)
+  const publicDir = path.join(__dirname, '..', 'public')
+  app.use(express.static(publicDir))
+  console.log(`[Static] Sirviendo frontend desde: ${publicDir}`)
 
   // ── Rutas API ─────────────────────────────────────────────────────────────
   app.use('/chain',        chainRoutes)
   app.use('/mine',         mineRoutes)
   app.use('/transactions', transactionRoutes)
   app.use('/nodes',        nodeRoutes)
-  app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc))
 
-  // ── Endpoints de recepción de bloques ────────────────────────────────────
-  // El compañero prueba estos endpoints en orden hasta encontrar uno que responda.
-  // Todos usan la misma lógica de validación dual.
-  app.post('/block',          (req, res) => procesarBloqueRecibido(req, res, blockchain))
-  app.post('/blocks/receive', (req, res) => procesarBloqueRecibido(req, res, blockchain))
-  app.post('/blocks',         (req, res) => procesarBloqueRecibido(req, res, blockchain))
-  app.post('/chain/receive',  (req, res) => procesarBloqueRecibido(req, res, blockchain))
-  app.post('/receive-block',  (req, res) => procesarBloqueRecibido(req, res, blockchain))
+  // ── Swagger (solo si se cargó correctamente) ──────────────────────────────
+  if (swaggerUi && swaggerDoc) {
+    app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDoc))
+  } else {
+    app.get('/docs', (req, res) => {
+      res.status(503).send('Swagger no disponible — revisa swagger.yaml')
+    })
+  }
+
+  // ── Endpoints de recepción de bloques (múltiples alias) ───────────────────
+  const recibirBloque = (req, res) => procesarBloqueRecibido(req, res, blockchain)
+  app.post('/block',          recibirBloque)
+  app.post('/blocks/receive', recibirBloque)
+  app.post('/blocks',         recibirBloque)
+  app.post('/chain/receive',  recibirBloque)
+  app.post('/receive-block',  recibirBloque)
+  app.post('/receive',        recibirBloque)
 
   // ── Health check ──────────────────────────────────────────────────────────
   app.get('/health', (req, res) => {
@@ -209,13 +207,16 @@ async function startServer() {
     res.status(404).json({ error: `Ruta ${req.method} ${req.path} no encontrada` })
   })
 
-  // ── Error handler ─────────────────────────────────────────────────────────
+  // ── Error handler global (Express 5 requiere 4 parámetros) ───────────────
+  // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     console.error(`[Error] ${err.message}`)
+    console.error(err.stack)
     res.status(500).json({ error: 'Error interno del servidor' })
   })
 
-  app.listen(PORT, () => {
+  // ── Levantar servidor ─────────────────────────────────────────────────────
+  const server = app.listen(PORT, () => {
     console.log(`\n Nodo blockchain corriendo`)
     console.log(`   NODE_ID  : ${process.env.NODE_ID || 'nodo-1'}`)
     console.log(`   Puerto   : ${PORT}`)
@@ -223,9 +224,28 @@ async function startServer() {
     console.log(`   Frontend : http://localhost:${PORT}/`)
     console.log(`   Docs     : http://localhost:${PORT}/docs\n`)
   })
+
+  // ── Keepalive: evitar clean exit ──────────────────────────────────────────
+  // Node.js sale automáticamente cuando no hay handles activos.
+  // Forzamos que el servidor permanezca vivo ante cualquier error no capturado.
+  server.keepAliveTimeout = 65000
+
+  process.on('uncaughtException', (err) => {
+    console.error('[UncaughtException]', err.message)
+    console.error(err.stack)
+    // No cerramos el proceso — el servidor sigue vivo
+  })
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[UnhandledRejection]', reason)
+    // No cerramos el proceso
+  })
+
+  return server
 }
 
 startServer().catch(err => {
   console.error('[Fatal] No se pudo iniciar el servidor:', err.message)
+  console.error(err.stack)
   process.exit(1)
 })
